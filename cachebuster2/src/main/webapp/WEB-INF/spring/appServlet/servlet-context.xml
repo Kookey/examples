@@ -9,11 +9,65 @@
 						http://www.springframework.org/schema/context 
 						http://www.springframework.org/schema/context/spring-context.xsd">
 
+
 	<!-- DispatcherServlet Context: defines this servlet's request-processing 
 		infrastructure -->
 
 	<!-- Enables the Spring MVC @Controller programming model -->
 	<mvc:annotation-driven />
+    <beans:bean name="/hello" class="com.blogspot.sunitkatkar.HelloController">
+
+    </beans:bean>
+
+    <beans:bean id="custom" class="com.blogspot.adapter.CustomAdapter">
+
+    </beans:bean>
+
+    <!--Controller,MultiActionController 继承和注解的支持 start-->
+    <beans:bean class="org.springframework.web.servlet.mvc.support.ControllerClassNameHandlerMapping"></beans:bean>
+
+    <beans:bean class="com.blogspot.sunitkatkar.MultiController"/>
+    <!--end-->
+
+    <beans:bean name="/custom" class="com.blogspot.sunitkatkar.CustomController">
+    </beans:bean>
+    <beans:alias alias="/custom2" name="/custom"></beans:alias>
+
+    <beans:bean id="helloInterceptor" class="com.blogspot.interceptor.HelloInterceptor">
+
+    </beans:bean>
+
+    <beans:bean id="simple" name="" class="com.blogspot.sunitkatkar.SimpleController"/>
+
+    <beans:bean id="simple2" class="com.blogspot.sunitkatkar.Simple2Controller"></beans:bean>
+
+
+
+    <beans:bean class="org.springframework.web.servlet.handler.SimpleUrlHandlerMapping">
+        <!--<beans:property name="mappings">-->
+            <!--<beans:props>-->
+                <!--<beans:prop key="/simple">simple</beans:prop>-->
+            <!--</beans:props>-->
+        <!--</beans:property>-->
+        <beans:property name="mappings">
+            <beans:bean class="org.springframework.beans.factory.config.PropertiesFactoryBean">
+                <beans:property name="location" value="classpath:url.properties" />
+            </beans:bean>
+        </beans:property>
+        <beans:property name="urlMap">
+            <beans:map>
+                <beans:entry key="/simple2" value-ref="simple2"/>
+            </beans:map>
+        </beans:property>
+
+    </beans:bean>
+    
+    <mvc:interceptors>
+        <mvc:interceptor >
+            <mvc:mapping path="/hello"/>
+            <beans:ref bean="helloInterceptor" ></beans:ref>
+        </mvc:interceptor>
+    </mvc:interceptors>
 
 	<!-- Handles HTTP GET requests for /resources/** by efficiently serving 
 		up static resources in the ${webappRoot}/resources directory The resolvers 
@@ -24,9 +78,9 @@
 			auto-registration="true">
 			<mvc:resolvers>
 				<mvc:version-resolver>
-					<mvc:content-version-strategy
-						patterns="/**" />
-					<!-- <mvc:fixed-version-strategy version="1.1.1" patterns="/**"/> -->
+					<!--<mvc:content-version-strategy-->
+						<!--patterns="/**" />-->
+					 <mvc:fixed-version-strategy version="1.1.1" patterns="/**"/>
 				</mvc:version-resolver>
 			</mvc:resolvers>
 		</mvc:resource-chain>
@@ -40,5 +94,5 @@
 		<beans:property name="suffix" value=".jsp" />
 	</beans:bean>
 
-	<context:component-scan base-package="com.blogspot.sunitkatkar" />
+	<context:component-scan base-package="com.blogspot" />
 </beans:beans>
