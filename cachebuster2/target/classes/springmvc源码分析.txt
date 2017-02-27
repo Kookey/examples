@@ -1,0 +1,639 @@
+==============================================================================
+初始化阶段：
+HttpServletBean -> 
+init() (Servlet的无参方法)
+
+// Set bean properties from init parameters.
+PropertyValues pvs = new ServletConfigPropertyValues(getServletConfig(), this.requiredProperties);
+BeanWrapper bw = PropertyAccessorFactory.forBeanPropertyAccess(this);
+ResourceLoader resourceLoader = new ServletContextResourceLoader(getServletContext());
+bw.registerCustomEditor(Resource.class, new ResourceEditor(resourceLoader, getEnvironment()));
+initBeanWrapper(bw);
+bw.setPropertyValues(pvs, true);
+
+PropertyValues pvs = new ServletConfigPropertyValues(getServletConfig(), this.requiredProperties);
+作用是读取 web.xml 文件中的 
+<init-param>
+  <param-name>contextConfigLocation</param-name>
+  <param-value>/WEB-INF/spring-mvc.xml</param-value>
+</init-param>
+
+BeanWrapper bw = PropertyAccessorFactory.forBeanPropertyAccess(this);
+this->指向的式DispatcherServlet
+BeanWrapper 是spring提供一个用来操作javabean属性的工具
+
+bw.setPropertyValues(pvs, true); 
+的作用就是调用 DispatcherServlet 的setContextConfigLocation 方法（setContextConfigLocation是DispatcherServlet继承 FrameworkServlet 而来）
+
+initServletBean();（在HttpServletBean类中，是设计模式中的模板方法，在FrameworkServlet 中实现了）
+
+
+FrameworkServlet：
+核心代码
+initWebApplicationContext();
+initFrameworkServlet();（模板方法，但是子类并没有实现）
+所以核心方法只有一个initWebApplicationContext
+
+
+/**
+ * Initialize and publish the WebApplicationContext for this servlet.
+ * <p>Delegates to {@link #createWebApplicationContext} for actual creation
+ * of the context. Can be overridden in subclasses.
+ * @return the WebApplicationContext instance
+ * @see #FrameworkServlet(WebApplicationContext)
+ * @see #setContextClass
+ * @see #setContextConfigLocation
+ * 初始化并且保存WebApplicationContext到servletContext中
+ * 初始化WebApplicationContext的代表方法createWebApplicationContext()
+ */
+protected WebApplicationContext initWebApplicationContext() {
+	WebApplicationContext rootContext =
+			WebApplicationContextUtils.getWebApplicationContext(getServletContext());
+	WebApplicationContext wac = null;
+
+	if (this.webApplicationContext != null) {
+		//1、如果已经通过构造方法设置了webApplicationContext
+		wac = this.webApplicationContext;
+		if (wac instanceof ConfigurableWebApplicationContext) {
+			ConfigurableWebApplicationContext cwac = (ConfigurableWebApplicationContext) wac;
+			if (!cwac.isActive()) {
+				// The context has not yet been refreshed -> provide services such as
+				// setting the parent context, setting the application context id, etc
+				if (cwac.getParent() == null) {
+					// The context instance was injected without an explicit parent -> set
+					// the root application context (if any; may be null) as the parent
+					cwac.setParent(rootContext);
+				}
+				configureAndRefreshWebApplicationContext(cwac);
+			}
+		}
+	}
+	if (wac == null) {
+		//如果webApplicationContext已经存在ServletContext中了，通过配置在Servlet中
+		//的contextAttribute参数获取
+		wac = findWebApplicationContext();
+	}
+	if (wac == null) {
+		//如果没有webApplicationContext则创建一个（默认执行的就是这个方法）
+		wac = createWebApplicationContext(rootContext);
+	}
+
+	if (!this.refreshEventReceived) {
+		//当ContextRefreshedEvent事件没有触发时调用此方法，模板方法，可以在子类重写
+		onRefresh(wac);
+	}
+
+	if (this.publishContext) {
+		//将ApplicationContext保存到sevletContext中
+		String attrName = getServletContextAttributeName();
+		getServletContext().setAttribute(attrName, wac);
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug("Published WebApplicationContext of servlet '" + getServletName() +
+					"' as ServletContext attribute with name [" + attrName + "]");
+		}
+	}
+
+	return wac;
+}
+
+initWebApplicationContext方法做了三件事：
+1、获取spring的根容器rootContext
+2、设置webApplicationContext并根据情况调用onRefresh方法（重点）
+3、将webApplicationContext设置到ServletContext中。
+
+DispatcherServlet
+
+	@Override
+	protected void onRefresh(ApplicationContext context) {
+		initStrategies(context);
+	}
+
+	/**
+	 * Initialize the strategy objects that this servlet uses.
+	 * <p>May be overridden in subclasses in order to initialize further strategy objects.
+	 */
+	protected void initStrategies(ApplicationContext context) {
+		initMultipartResolver(context);
+		initLocaleResolver(context);
+		initThemeResolver(context);
+		initHandlerMappings(context);
+		initHandlerAdapters(context);
+		initHandlerExceptionResolvers(context);
+		initRequestToViewNameTranslator(context);
+		initViewResolvers(context);
+		initFlashMapManager(context);
+	}
+	
+核心方法是initStrategies，功能是初始化9个组件
+通过 initStrategies方法的注释我们可以理解下这个写的好处
+就是可以通过子类覆盖initStrategies方法去添加更多的strategy对象
+=========================分割线=======================================
+请求处理阶段：
+FrameworkServlet
+在FrameworkServlet中重写了service，doGet,doPost,doPut,doDelete,doOptions,doTrace方法（除了doHead的所有处理请求方法）
+在被重写的方法里面又统一交给processRequest（最核心的方法）方法处理
+processRequest（装饰器模式），核心方法是doService
+
+/**
+ * Process this request, publishing an event regardless of the outcome.
+ * <p>The actual event handling is performed by the abstract
+ * {@link #doService} template method.
+ */
+protected final void processRequest(HttpServletRequest request, HttpServletResponse response)
+		throws ServletException, IOException {
+
+	long startTime = System.currentTimeMillis();
+	Throwable failureCause = null;
+	//获取LocalContextHolder中原来保存的LocalContext
+	LocaleContext previousLocaleContext = LocaleContextHolder.getLocaleContext();
+	//获取当前请求的的LocalContext
+	LocaleContext localeContext = buildLocaleContext(request);
+    //获取RequestContextHolder中原来保存的RequestAttributes
+	RequestAttributes previousAttributes = RequestContextHolder.getRequestAttributes();
+	//获取当前请求的RequestAttributes
+	ServletRequestAttributes requestAttributes = buildRequestAttributes(request, response, previousAttributes);
+
+	WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+	asyncManager.registerCallableInterceptor(FrameworkServlet.class.getName(), new RequestBindingInterceptor());
+	//将当前LocaleContext，RequestAttributes设置到LocaleContextHolder，RequestContextHolder中
+	initContextHolders(request, localeContext, requestAttributes);
+
+	try {
+		//实际的请求处理入口
+		doService(request, response);
+	}
+	catch (ServletException ex) {
+		failureCause = ex;
+		throw ex;
+	}
+	catch (IOException ex) {
+		failureCause = ex;
+		throw ex;
+	}
+	catch (Throwable ex) {
+		failureCause = ex;
+		throw new NestedServletException("Request processing failed", ex);
+	}
+
+	finally {
+		//恢复原来的LocaleContext，RequestAttributes到LocaleContextHolder，RequestContextHolder中
+		resetContextHolders(request, previousLocaleContext, previousAttributes);
+		if (requestAttributes != null) {
+			requestAttributes.requestCompleted();
+		}
+
+		if (logger.isDebugEnabled()) {
+			if (failureCause != null) {
+				this.logger.debug("Could not complete request", failureCause);
+			}
+			else {
+				if (asyncManager.isConcurrentHandlingStarted()) {
+					logger.debug("Leaving response open for concurrent processing");
+				}
+				else {
+					this.logger.debug("Successfully completed request");
+				}
+			}
+		}
+		//发布ServletRequestHandleEvent消息
+		publishRequestHandledEvent(request, response, startTime, failureCause);
+	}
+}
+processRequest 主要做两件事：
+1、对LocaleContext，RequestAttributes的设置和恢复
+2、处理完请求发布ServletRequestHandleEvent消息
+
+
+/**
+ * 暴露 DispatcherServlet 特殊的请求属性然后委托给doDispatch方法进行处理
+ */
+@Override
+protected void doService(HttpServletRequest request, HttpServletResponse response) throws Exception {
+	if (logger.isDebugEnabled()) {
+		String resumed = WebAsyncUtils.getAsyncManager(request).hasConcurrentResult() ? " resumed" : "";
+		logger.debug("DispatcherServlet with name '" + getServletName() + "'" + resumed +
+				" processing " + request.getMethod() + " request for [" + getRequestUri(request) + "]");
+	}
+
+	// Keep a snapshot of the request attributes in case of an include,
+	// to be able to restore the original attributes after the include.
+	Map<String, Object> attributesSnapshot = null;
+	if (WebUtils.isIncludeRequest(request)) {
+		attributesSnapshot = new HashMap<String, Object>();
+		Enumeration<?> attrNames = request.getAttributeNames();
+		while (attrNames.hasMoreElements()) {
+			String attrName = (String) attrNames.nextElement();
+			if (this.cleanupAfterInclude || attrName.startsWith("org.springframework.web.servlet")) {
+				attributesSnapshot.put(attrName, request.getAttribute(attrName));
+			}
+		}
+	}
+
+	// 提供框架对handle和view objects的处理能力。
+	request.setAttribute(WEB_APPLICATION_CONTEXT_ATTRIBUTE, getWebApplicationContext());
+	request.setAttribute(LOCALE_RESOLVER_ATTRIBUTE, this.localeResolver);
+	request.setAttribute(THEME_RESOLVER_ATTRIBUTE, this.themeResolver);
+	request.setAttribute(THEME_SOURCE_ATTRIBUTE, getThemeSource());
+
+	//重定向时参数传递
+	FlashMap inputFlashMap = this.flashMapManager.retrieveAndUpdate(request, response);
+	if (inputFlashMap != null) {
+		request.setAttribute(INPUT_FLASH_MAP_ATTRIBUTE, Collections.unmodifiableMap(inputFlashMap));
+	}
+	request.setAttribute(OUTPUT_FLASH_MAP_ATTRIBUTE, new FlashMap());
+	request.setAttribute(FLASH_MAP_MANAGER_ATTRIBUTE, this.flashMapManager);
+
+	try {
+		doDispatch(request, response);
+	}
+	finally {
+		if (!WebAsyncUtils.getAsyncManager(request).isConcurrentHandlingStarted()) {
+			// Restore the original attribute snapshot, in case of an include.
+			if (attributesSnapshot != null) {
+				//还原快照
+				restoreAttributesAfterInclude(request, attributesSnapshot);
+			}
+		}
+	}
+}
+doService 所做的事情如下：
+1、对request设置一些属性；
+2、如果是include请求对request当前的属性做快照备份和恢复
+3、将请求转发给doDispatch方法处理
+
+/**
+ * Process the actual dispatching to the handler.
+ * <p>The handler will be obtained by applying the servlet's HandlerMappings in order.
+ * The HandlerAdapter will be obtained by querying the servlet's installed HandlerAdapters
+ * to find the first that supports the handler class.
+ * <p>All HTTP methods are handled by this method. It's up to HandlerAdapters or handlers
+ * themselves to decide which methods are acceptable.
+ * @param request current HTTP request
+ * @param response current HTTP response
+ * @throws Exception in case of any kind of processing failure
+ */
+protected void doDispatch(HttpServletRequest request, HttpServletResponse response) throws Exception {
+	HttpServletRequest processedRequest = request;
+	HandlerExecutionChain mappedHandler = null;
+	boolean multipartRequestParsed = false;
+
+	WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+
+	try {
+		ModelAndView mv = null;
+		Exception dispatchException = null;
+
+		try {
+			//检查是不是上传请求
+			processedRequest = checkMultipart(request);
+			multipartRequestParsed = (processedRequest != request);
+
+			//根据request找到handler
+			mappedHandler = getHandler(processedRequest);
+			if (mappedHandler == null || mappedHandler.getHandler() == null) {
+				noHandlerFound(processedRequest, response);
+				return;
+			}
+
+			//根据handler找到handlerAdapter
+			HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+
+			// Process last-modified header, if supported by the handler.
+			String method = request.getMethod();
+			boolean isGet = "GET".equals(method);
+			if (isGet || "HEAD".equals(method)) {
+				long lastModified = ha.getLastModified(request, mappedHandler.getHandler());
+				if (logger.isDebugEnabled()) {
+					logger.debug("Last-Modified value for [" + getRequestUri(request) + "] is: " + lastModified);
+				}
+				if (new ServletWebRequest(request, response).checkNotModified(lastModified) && isGet) {
+					return;
+				}
+			}
+			//执行相应的Interceptor的preHandle
+			if (!mappedHandler.applyPreHandle(processedRequest, response)) {
+				return;
+			}
+
+			// HandleAdapter使用handle处理请求
+			mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+
+			if (asyncManager.isConcurrentHandlingStarted()) {
+				return;
+			}
+			//当View为空时（比如：Handler返回为void）
+			applyDefaultViewName(processedRequest, mv);
+			//执行相应的Interceptor的postHandle
+			mappedHandler.applyPostHandle(processedRequest, response, mv);
+		}
+		catch (Exception ex) {
+			dispatchException = ex;
+		}
+		//返回处理结果。包括处理异常，渲染页面，
+		processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+	}
+	catch (Exception ex) {
+		发出完成通知触发Interceptor的afterCompletion
+		triggerAfterCompletion(processedRequest, response, mappedHandler, ex);
+	}
+	catch (Error err) {
+		triggerAfterCompletionWithError(processedRequest, response, mappedHandler, err);
+	}
+	finally {
+		//判断是否是异步请求
+		if (asyncManager.isConcurrentHandlingStarted()) {
+			// Instead of postHandle and afterCompletion
+			if (mappedHandler != null) {
+				mappedHandler.applyAfterConcurrentHandlingStarted(processedRequest, response);
+			}
+		}
+		else {
+			// 删除上传请求的临时资源
+			if (multipartRequestParsed) {
+				cleanupMultipart(processedRequest);
+			}
+		}
+	}
+}
+doDispatch方法的核心功能如下：
+1、根据request找Handler
+2、根据handle找handleAdapter
+3、用handleAdapter处理Handle
+4、processDispatchResult方法处理上面处理之后的结果（包含找到View并渲染输出给用户）
+核心概念： HandleMapping,Handle,HandlerAdapter
+总结：
+使用HandlerMapping找到干活的Handler(干活的工具)，找到使用Handler的HandlerAdapter(使用工具干活的人)，让HandlerAdapter使用Handler进行工作，
+干完活后将结果写个报告上交（通过View展示给用户）
+
+getHandler：根据request找到相应的处理器
+===========================================================================
+HandlerMapping：
+/**
+ * Look up a handler for the given request, falling back to the default
+ * handler if no specific one is found.
+ * @param request current HTTP request
+ * @return the corresponding handler instance, or the default handler
+ * @see #getHandlerInternal
+ */
+@Override
+public final HandlerExecutionChain getHandler(HttpServletRequest request) throws Exception {
+	Object handler = getHandlerInternal(request);
+	if (handler == null) {
+		handler = getDefaultHandler();
+	}
+	if (handler == null) {
+		return null;
+	}
+	// Bean name or resolved handler?
+	if (handler instanceof String) {
+		String handlerName = (String) handler;
+		handler = getApplicationContext().getBean(handlerName);
+	}
+
+	HandlerExecutionChain executionChain = getHandlerExecutionChain(handler, request);
+	if (CorsUtils.isCorsRequest(request)) {
+		CorsConfiguration globalConfig = this.corsConfigSource.getCorsConfiguration(request);
+		CorsConfiguration handlerConfig = getCorsConfiguration(handler, request);
+		CorsConfiguration config = (globalConfig != null ? globalConfig.combine(handlerConfig) : handlerConfig);
+		executionChain = getCorsHandlerExecutionChain(request, executionChain, config);
+	}
+	return executionChain;
+}
+HandlerMapping的作用是根据request查找Handler和Interceptors。获取Handler是通过模板方法getHandlerInternal交给子类
+getHandler分为两部分，getHandlerExecutionChain之前找Handler,getHandlerExecutionChain方法用于添加拦截器。
+
+protected HandlerExecutionChain getHandlerExecutionChain(Object handler, HttpServletRequest request) {
+	HandlerExecutionChain chain = (handler instanceof HandlerExecutionChain ?
+			(HandlerExecutionChain) handler : new HandlerExecutionChain(handler));
+
+	String lookupPath = this.urlPathHelper.getLookupPathForRequest(request);
+	for (HandlerInterceptor interceptor : this.adaptedInterceptors) {
+		if (interceptor instanceof MappedInterceptor) {
+			MappedInterceptor mappedInterceptor = (MappedInterceptor) interceptor;
+			if (mappedInterceptor.matches(lookupPath, this.pathMatcher)) {
+				chain.addInterceptor(mappedInterceptor.getInterceptor());
+			}
+		}
+		else {
+			chain.addInterceptor(interceptor);
+		}
+	}
+	return chain;
+}
+使用handler创建出HandlerExecutionChain，然后将adaptedInterceptors和符合要求的mappedInterceptor添加进去，最后将其返回
+===============================================================================================
+AbstractHandlerMapping：
+AbstractHandlerMapping 继承 WebApplicationObjectSupport，初始化时会自动调用模板方法initApplicationContext
+@Override
+protected void initApplicationContext() throws BeansException {
+	extendInterceptors(this.interceptors);
+	detectMappedInterceptors(this.adaptedInterceptors);
+	initInterceptors();
+}
+
+/**
+ * Detect beans of type {@link MappedInterceptor} and add them to the list of mapped interceptors.
+ * <p>This is called in addition to any {@link MappedInterceptor}s that may have been provided
+ * via {@link #setInterceptors}, by default adding all beans of type {@link MappedInterceptor}
+ * from the current context and its ancestors. Subclasses can override and refine this policy.
+ * @param mappedInterceptors an empty list to add {@link MappedInterceptor} instances to
+ */
+protected void detectMappedInterceptors(List<HandlerInterceptor> mappedInterceptors) {
+	mappedInterceptors.addAll(
+			BeanFactoryUtils.beansOfTypeIncludingAncestors(
+					getApplicationContext(), MappedInterceptor.class, true, false).values());
+}
+
+/**
+ * Initialize the specified interceptors, checking for {@link MappedInterceptor}s and
+ * adapting {@link HandlerInterceptor}s and {@link WebRequestInterceptor}s if necessary.
+ * @see #setInterceptors
+ * @see #adaptInterceptor
+ */
+protected void initInterceptors() {
+	if (!this.interceptors.isEmpty()) {
+		for (int i = 0; i < this.interceptors.size(); i++) {
+			Object interceptor = this.interceptors.get(i);
+			if (interceptor == null) {
+				throw new IllegalArgumentException("Entry number " + i + " in interceptors array is null");
+			}
+			this.adaptedInterceptors.add(adaptInterceptor(interceptor));
+		}
+	}
+}
+
+initApplicationContext 有三个方法，extendInterceptors，detectMappedInterceptors，initInterceptors
+extendInterceptors在springmvc中没有实现，可以忽略
+detectMappedInterceptors是将springmvc容器中的所有MappedInterceptor类型的Bean添加到mappedInterceptors中
+======================================================================================
+AbstractUrlHandlerMapping
+@Override
+protected Object getHandlerInternal(HttpServletRequest request) throws Exception {
+	String lookupPath = getUrlPathHelper().getLookupPathForRequest(request);
+	Object handler = lookupHandler(lookupPath, request);
+	if (handler == null) {
+		//定义一个临时变量，保存找到的原始Handler
+		Object rawHandler = null;
+		if ("/".equals(lookupPath)) {
+			rawHandler = getRootHandler();
+		}
+		if (rawHandler == null) {
+			rawHandler = getDefaultHandler();
+		}
+		if (rawHandler != null) {
+			// 如果是string类型则到容器中查找具体的Bean
+			if (rawHandler instanceof String) {
+				String handlerName = (String) rawHandler;
+				rawHandler = getApplicationContext().getBean(handlerName);
+			}
+			//模板方法，但是子类并没有实现
+			validateHandler(rawHandler, request);
+			handler = buildPathExposingHandler(rawHandler, lookupPath, lookupPath, null);
+		}
+	}
+	if (handler != null && logger.isDebugEnabled()) {
+		logger.debug("Mapping [" + lookupPath + "] to " + handler);
+	}
+	else if (handler == null && logger.isTraceEnabled()) {
+		logger.trace("No handler mapping found for [" + lookupPath + "]");
+	}
+	return handler;
+}
+getHandlerInternal方法中有两个核心方法是：lookupHandler，buildPathExposingHandler
+protected Object lookupHandler(String urlPath, HttpServletRequest request) throws Exception {
+	// 根据urlPath直接在handlerMap中查找（重点，后面会分析handlerMap的初始化）
+	Object handler = this.handlerMap.get(urlPath);
+	if (handler != null) {
+		// 如果是string类型则从容器中获取
+		if (handler instanceof String) {
+			String handlerName = (String) handler;
+			handler = getApplicationContext().getBean(handlerName);
+		}
+		validateHandler(handler, request);
+		return buildPathExposingHandler(handler, urlPath, urlPath, null);
+	}
+	// Pattern match
+	List<String> matchingPatterns = new ArrayList<String>();
+	for (String registeredPattern : this.handlerMap.keySet()) {
+		if (getPathMatcher().match(registeredPattern, urlPath)) {
+			matchingPatterns.add(registeredPattern);
+		}
+		else if (useTrailingSlashMatch()) {
+			if (!registeredPattern.endsWith("/") && getPathMatcher().match(registeredPattern + "/", urlPath)) {
+				matchingPatterns.add(registeredPattern +"/");
+			}
+		}
+	}
+	String bestPatternMatch = null;
+	Comparator<String> patternComparator = getPathMatcher().getPatternComparator(urlPath);
+	if (!matchingPatterns.isEmpty()) {
+		Collections.sort(matchingPatterns, patternComparator);
+		if (logger.isDebugEnabled()) {
+			logger.debug("Matching patterns for request [" + urlPath + "] are " + matchingPatterns);
+		}
+		bestPatternMatch = matchingPatterns.get(0);
+	}
+	if (bestPatternMatch != null) {
+		handler = this.handlerMap.get(bestPatternMatch);
+		if (handler == null) {
+			Assert.isTrue(bestPatternMatch.endsWith("/"));
+			handler = this.handlerMap.get(bestPatternMatch.substring(0, bestPatternMatch.length() - 1));
+		}
+		// Bean name or resolved handler?
+		if (handler instanceof String) {
+			String handlerName = (String) handler;
+			handler = getApplicationContext().getBean(handlerName);
+		}
+		validateHandler(handler, request);
+		String pathWithinMapping = getPathMatcher().extractPathWithinPattern(bestPatternMatch, urlPath);
+
+		// There might be multiple 'best patterns', let's make sure we have the correct URI template variables
+		// for all of them
+		Map<String, String> uriTemplateVariables = new LinkedHashMap<String, String>();
+		for (String matchingPattern : matchingPatterns) {
+			if (patternComparator.compare(bestPatternMatch, matchingPattern) == 0) {
+				Map<String, String> vars = getPathMatcher().extractUriTemplateVariables(matchingPattern, urlPath);
+				Map<String, String> decodedVars = getUrlPathHelper().decodePathVariables(request, vars);
+				uriTemplateVariables.putAll(decodedVars);
+			}
+		}
+		if (logger.isDebugEnabled()) {
+			logger.debug("URI Template variables for request [" + urlPath + "] are " + uriTemplateVariables);
+		}
+		return buildPathExposingHandler(handler, bestPatternMatch, pathWithinMapping, uriTemplateVariables);
+	}
+	// No handler found...
+	return null;
+}
+
+protected Object buildPathExposingHandler(Object rawHandler, String bestMatchingPattern,
+		String pathWithinMapping, Map<String, String> uriTemplateVariables) {
+
+	HandlerExecutionChain chain = new HandlerExecutionChain(rawHandler);
+	chain.addInterceptor(new PathExposingHandlerInterceptor(bestMatchingPattern, pathWithinMapping));
+	if (!CollectionUtils.isEmpty(uriTemplateVariables)) {
+		chain.addInterceptor(new UriTemplateVariablesHandlerInterceptor(uriTemplateVariables));
+	}
+	return chain;
+}
+buildPathExposingHandler方法用于给查找到的Handler注册两个拦截器PathExposingHandlerInterceptor，UriTemplateVariablesHandlerInterceptor
+
+handlerMap的初始化是通过registerHandler方法进行，registerHandler方法既不是自己调用，也不是父类调用而是由子类调用，这样不同的子类就可以通过
+registerHandler注册不同的Handler将组件创建出来
+==============================================================
+AbstractUrlHandlerMapping 的两个子类
+SimpleUrlHandlerMapping类非常简单，就是直接将配置的内容注册到AbstractUrlHandlerMapping中
+AbstractDetectingUrlHandlerMapping
+
+	@Override
+	public void initApplicationContext() throws ApplicationContextException {
+		super.initApplicationContext();
+		detectHandlers();
+	}
+
+	/**
+	 * Register all handlers found in the current ApplicationContext.
+	 * <p>The actual URL determination for a handler is up to the concrete
+	 * {@link #determineUrlsForHandler(String)} implementation. A bean for
+	 * which no such URLs could be determined is simply not considered a handler.
+	 * @throws org.springframework.beans.BeansException if the handler couldn't be registered
+	 * @see #determineUrlsForHandler(String)
+	 */
+	protected void detectHandlers() throws BeansException {
+		if (logger.isDebugEnabled()) {
+			logger.debug("Looking for URL mappings in application context: " + getApplicationContext());
+		}
+		String[] beanNames = (this.detectHandlersInAncestorContexts ?
+				BeanFactoryUtils.beanNamesForTypeIncludingAncestors(getApplicationContext(), Object.class) :
+				getApplicationContext().getBeanNamesForType(Object.class));
+
+		// Take any bean name that we can determine URLs for.
+		for (String beanName : beanNames) {
+			String[] urls = determineUrlsForHandler(beanName);
+			if (!ObjectUtils.isEmpty(urls)) {
+				// URL paths found: Let's consider it a handler.
+				registerHandler(urls, beanName);
+			}
+			else {
+				if (logger.isDebugEnabled()) {
+					logger.debug("Rejected bean name '" + beanName + "': no URL paths identified");
+				}
+			}
+		}
+	}
+核心方法：determineUrlsForHandler 是模板方法，有子类实现
+AbstractDetectingUrlHandlerMapping的三个子类：
+AbstractControllerUrlHandlerMapping
+BeanNameUrlHandlerMapping
+DefaultAnnotationHandlerMapping(已被弃用)
+
+BeanNameUrlHandlerMapping 检查beanName和 alias是不是以“/”开头
+
+AbstractControllerUrlHandlerMapping 有两个子类
+ControllerClassNameHandlerMapping
+ControllerBeanNameHandlerMapping
+一个是以className作为url
+另一个是使用spring容器的beanName作为url
+=============================================================
+AbstractHandlerMethodMapping
+如果想要理解AbstractHandlerMethodMapping系列，则必须必须搞明白
