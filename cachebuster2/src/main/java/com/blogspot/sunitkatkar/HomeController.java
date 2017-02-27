@@ -10,6 +10,7 @@ import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.servlet.mvc.method.annotation.MvcUriComponentsBuilder;
 
 /**
  * Handles requests for the application home page.
@@ -35,5 +36,16 @@ public class HomeController {
 		
 		return "home";
 	}
-	
+
+  @RequestMapping(value = "/index", method = RequestMethod.GET)
+  public String index(){
+    return "home2";
+  }
+
+  public static void main(String[] args) {
+    MvcUriComponentsBuilder.MethodArgumentBuilder builder = MvcUriComponentsBuilder.fromMappingName("HC#index");
+    String build = builder.build();
+    System.out.println(build);
+  }
+
 }

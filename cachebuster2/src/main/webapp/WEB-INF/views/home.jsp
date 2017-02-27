@@ -29,7 +29,7 @@
 		<button id="btnWelcome">Click Me</button>
 	</p>
 
-
+    <a href="${spring:mvcUrl('HC#index').build()}">测试</a>
 
 
 </body>

@@ -23,9 +23,11 @@
 
     </beans:bean>
 
-    <!--<beans:bean class="org.springframework.web.servlet.mvc.support.ControllerClassNameHandlerMapping"></beans:bean>-->
+    <!--Controller,MultiActionController 继承和注解的支持 start-->
+    <beans:bean class="org.springframework.web.servlet.mvc.support.ControllerClassNameHandlerMapping"></beans:bean>
 
     <beans:bean class="com.blogspot.sunitkatkar.MultiController"/>
+    <!--end-->
 
     <beans:bean name="/custom" class="com.blogspot.sunitkatkar.CustomController">
     </beans:bean>

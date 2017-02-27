@@ -1,0 +1,1477 @@
+==============================================================================
+初始化阶段：
+HttpServletBean -> 
+init() (Servlet的无参方法)
+
+// Set bean properties from init parameters.
+PropertyValues pvs = new ServletConfigPropertyValues(getServletConfig(), this.requiredProperties);
+BeanWrapper bw = PropertyAccessorFactory.forBeanPropertyAccess(this);
+ResourceLoader resourceLoader = new ServletContextResourceLoader(getServletContext());
+bw.registerCustomEditor(Resource.class, new ResourceEditor(resourceLoader, getEnvironment()));
+initBeanWrapper(bw);
+bw.setPropertyValues(pvs, true);
+
+PropertyValues pvs = new ServletConfigPropertyValues(getServletConfig(), this.requiredProperties);
+作用是读取 web.xml 文件中的 
+<init-param>
+  <param-name>contextConfigLocation</param-name>
+  <param-value>/WEB-INF/spring-mvc.xml</param-value>
+</init-param>
+
+BeanWrapper bw = PropertyAccessorFactory.forBeanPropertyAccess(this);
+this->指向的式DispatcherServlet
+BeanWrapper 是spring提供一个用来操作javabean属性的工具
+
+bw.setPropertyValues(pvs, true); 
+的作用就是调用 DispatcherServlet 的setContextConfigLocation 方法（setContextConfigLocation是DispatcherServlet继承 FrameworkServlet 而来）
+
+initServletBean();（在HttpServletBean类中，是设计模式中的模板方法，在FrameworkServlet 中实现了）
+
+
+FrameworkServlet：
+核心代码
+initWebApplicationContext();
+initFrameworkServlet();（模板方法，但是子类并没有实现）
+所以核心方法只有一个initWebApplicationContext
+
+
+/**
+ * Initialize and publish the WebApplicationContext for this servlet.
+ * <p>Delegates to {@link #createWebApplicationContext} for actual creation
+ * of the context. Can be overridden in subclasses.
+ * @return the WebApplicationContext instance
+ * @see #FrameworkServlet(WebApplicationContext)
+ * @see #setContextClass
+ * @see #setContextConfigLocation
+ * 初始化并且保存WebApplicationContext到servletContext中
+ * 初始化WebApplicationContext的代表方法createWebApplicationContext()
+ */
+protected WebApplicationContext initWebApplicationContext() {
+	WebApplicationContext rootContext =
+			WebApplicationContextUtils.getWebApplicationContext(getServletContext());
+	WebApplicationContext wac = null;
+
+	if (this.webApplicationContext != null) {
+		//1、如果已经通过构造方法设置了webApplicationContext
+		wac = this.webApplicationContext;
+		if (wac instanceof ConfigurableWebApplicationContext) {
+			ConfigurableWebApplicationContext cwac = (ConfigurableWebApplicationContext) wac;
+			if (!cwac.isActive()) {
+				// The context has not yet been refreshed -> provide services such as
+				// setting the parent context, setting the application context id, etc
+				if (cwac.getParent() == null) {
+					// The context instance was injected without an explicit parent -> set
+					// the root application context (if any; may be null) as the parent
+					cwac.setParent(rootContext);
+				}
+				configureAndRefreshWebApplicationContext(cwac);
+			}
+		}
+	}
+	if (wac == null) {
+		//如果webApplicationContext已经存在ServletContext中了，通过配置在Servlet中
+		//的contextAttribute参数获取
+		wac = findWebApplicationContext();
+	}
+	if (wac == null) {
+		//如果没有webApplicationContext则创建一个（默认执行的就是这个方法）
+		wac = createWebApplicationContext(rootContext);
+	}
+
+	if (!this.refreshEventReceived) {
+		//当ContextRefreshedEvent事件没有触发时调用此方法，模板方法，可以在子类重写
+		onRefresh(wac);
+	}
+
+	if (this.publishContext) {
+		//将ApplicationContext保存到sevletContext中
+		String attrName = getServletContextAttributeName();
+		getServletContext().setAttribute(attrName, wac);
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug("Published WebApplicationContext of servlet '" + getServletName() +
+					"' as ServletContext attribute with name [" + attrName + "]");
+		}
+	}
+
+	return wac;
+}
+
+initWebApplicationContext方法做了三件事：
+1、获取spring的根容器rootContext
+2、设置webApplicationContext并根据情况调用onRefresh方法（重点）
+3、将webApplicationContext设置到ServletContext中。
+
+DispatcherServlet
+
+	@Override
+	protected void onRefresh(ApplicationContext context) {
+		initStrategies(context);
+	}
+
+	/**
+	 * Initialize the strategy objects that this servlet uses.
+	 * <p>May be overridden in subclasses in order to initialize further strategy objects.
+	 */
+	protected void initStrategies(ApplicationContext context) {
+		initMultipartResolver(context);
+		initLocaleResolver(context);
+		initThemeResolver(context);
+		initHandlerMappings(context);
+		initHandlerAdapters(context);
+		initHandlerExceptionResolvers(context);
+		initRequestToViewNameTranslator(context);
+		initViewResolvers(context);
+		initFlashMapManager(context);
+	}
+	
+核心方法是initStrategies，功能是初始化9个组件
+通过 initStrategies方法的注释我们可以理解下这个写的好处
+就是可以通过子类覆盖initStrategies方法去添加更多的strategy对象
+=========================分割线=======================================
+请求处理阶段：
+FrameworkServlet
+在FrameworkServlet中重写了service，doGet,doPost,doPut,doDelete,doOptions,doTrace方法（除了doHead的所有处理请求方法）
+在被重写的方法里面又统一交给processRequest（最核心的方法）方法处理
+processRequest（装饰器模式），核心方法是doService
+
+/**
+ * Process this request, publishing an event regardless of the outcome.
+ * <p>The actual event handling is performed by the abstract
+ * {@link #doService} template method.
+ */
+protected final void processRequest(HttpServletRequest request, HttpServletResponse response)
+		throws ServletException, IOException {
+
+	long startTime = System.currentTimeMillis();
+	Throwable failureCause = null;
+	//获取LocalContextHolder中原来保存的LocalContext
+	LocaleContext previousLocaleContext = LocaleContextHolder.getLocaleContext();
+	//获取当前请求的的LocalContext
+	LocaleContext localeContext = buildLocaleContext(request);
+    //获取RequestContextHolder中原来保存的RequestAttributes
+	RequestAttributes previousAttributes = RequestContextHolder.getRequestAttributes();
+	//获取当前请求的RequestAttributes
+	ServletRequestAttributes requestAttributes = buildRequestAttributes(request, response, previousAttributes);
+
+	WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+	asyncManager.registerCallableInterceptor(FrameworkServlet.class.getName(), new RequestBindingInterceptor());
+	//将当前LocaleContext，RequestAttributes设置到LocaleContextHolder，RequestContextHolder中
+	initContextHolders(request, localeContext, requestAttributes);
+
+	try {
+		//实际的请求处理入口
+		doService(request, response);
+	}
+	catch (ServletException ex) {
+		failureCause = ex;
+		throw ex;
+	}
+	catch (IOException ex) {
+		failureCause = ex;
+		throw ex;
+	}
+	catch (Throwable ex) {
+		failureCause = ex;
+		throw new NestedServletException("Request processing failed", ex);
+	}
+
+	finally {
+		//恢复原来的LocaleContext，RequestAttributes到LocaleContextHolder，RequestContextHolder中
+		resetContextHolders(request, previousLocaleContext, previousAttributes);
+		if (requestAttributes != null) {
+			requestAttributes.requestCompleted();
+		}
+
+		if (logger.isDebugEnabled()) {
+			if (failureCause != null) {
+				this.logger.debug("Could not complete request", failureCause);
+			}
+			else {
+				if (asyncManager.isConcurrentHandlingStarted()) {
+					logger.debug("Leaving response open for concurrent processing");
+				}
+				else {
+					this.logger.debug("Successfully completed request");
+				}
+			}
+		}
+		//发布ServletRequestHandleEvent消息
+		publishRequestHandledEvent(request, response, startTime, failureCause);
+	}
+}
+processRequest 主要做两件事：
+1、对LocaleContext，RequestAttributes的设置和恢复
+2、处理完请求发布ServletRequestHandleEvent消息
+
+
+/**
+ * 暴露 DispatcherServlet 特殊的请求属性然后委托给doDispatch方法进行处理
+ */
+@Override
+protected void doService(HttpServletRequest request, HttpServletResponse response) throws Exception {
+	if (logger.isDebugEnabled()) {
+		String resumed = WebAsyncUtils.getAsyncManager(request).hasConcurrentResult() ? " resumed" : "";
+		logger.debug("DispatcherServlet with name '" + getServletName() + "'" + resumed +
+				" processing " + request.getMethod() + " request for [" + getRequestUri(request) + "]");
+	}
+
+	// Keep a snapshot of the request attributes in case of an include,
+	// to be able to restore the original attributes after the include.
+	Map<String, Object> attributesSnapshot = null;
+	if (WebUtils.isIncludeRequest(request)) {
+		attributesSnapshot = new HashMap<String, Object>();
+		Enumeration<?> attrNames = request.getAttributeNames();
+		while (attrNames.hasMoreElements()) {
+			String attrName = (String) attrNames.nextElement();
+			if (this.cleanupAfterInclude || attrName.startsWith("org.springframework.web.servlet")) {
+				attributesSnapshot.put(attrName, request.getAttribute(attrName));
+			}
+		}
+	}
+
+	// 提供框架对handle和view objects的处理能力。
+	request.setAttribute(WEB_APPLICATION_CONTEXT_ATTRIBUTE, getWebApplicationContext());
+	request.setAttribute(LOCALE_RESOLVER_ATTRIBUTE, this.localeResolver);
+	request.setAttribute(THEME_RESOLVER_ATTRIBUTE, this.themeResolver);
+	request.setAttribute(THEME_SOURCE_ATTRIBUTE, getThemeSource());
+
+	//重定向时参数传递
+	FlashMap inputFlashMap = this.flashMapManager.retrieveAndUpdate(request, response);
+	if (inputFlashMap != null) {
+		request.setAttribute(INPUT_FLASH_MAP_ATTRIBUTE, Collections.unmodifiableMap(inputFlashMap));
+	}
+	request.setAttribute(OUTPUT_FLASH_MAP_ATTRIBUTE, new FlashMap());
+	request.setAttribute(FLASH_MAP_MANAGER_ATTRIBUTE, this.flashMapManager);
+
+	try {
+		doDispatch(request, response);
+	}
+	finally {
+		if (!WebAsyncUtils.getAsyncManager(request).isConcurrentHandlingStarted()) {
+			// Restore the original attribute snapshot, in case of an include.
+			if (attributesSnapshot != null) {
+				//还原快照
+				restoreAttributesAfterInclude(request, attributesSnapshot);
+			}
+		}
+	}
+}
+doService 所做的事情如下：
+1、对request设置一些属性；
+2、如果是include请求对request当前的属性做快照备份和恢复
+3、将请求转发给doDispatch方法处理
+
+/**
+ * Process the actual dispatching to the handler.
+ * <p>The handler will be obtained by applying the servlet's HandlerMappings in order.
+ * The HandlerAdapter will be obtained by querying the servlet's installed HandlerAdapters
+ * to find the first that supports the handler class.
+ * <p>All HTTP methods are handled by this method. It's up to HandlerAdapters or handlers
+ * themselves to decide which methods are acceptable.
+ * @param request current HTTP request
+ * @param response current HTTP response
+ * @throws Exception in case of any kind of processing failure
+ */
+protected void doDispatch(HttpServletRequest request, HttpServletResponse response) throws Exception {
+	HttpServletRequest processedRequest = request;
+	HandlerExecutionChain mappedHandler = null;
+	boolean multipartRequestParsed = false;
+
+	WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+
+	try {
+		ModelAndView mv = null;
+		Exception dispatchException = null;
+
+		try {
+			//检查是不是上传请求
+			processedRequest = checkMultipart(request);
+			multipartRequestParsed = (processedRequest != request);
+
+			//根据request找到handler
+			mappedHandler = getHandler(processedRequest);
+			if (mappedHandler == null || mappedHandler.getHandler() == null) {
+				noHandlerFound(processedRequest, response);
+				return;
+			}
+
+			//根据handler找到handlerAdapter
+			HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+
+			// Process last-modified header, if supported by the handler.
+			String method = request.getMethod();
+			boolean isGet = "GET".equals(method);
+			if (isGet || "HEAD".equals(method)) {
+				long lastModified = ha.getLastModified(request, mappedHandler.getHandler());
+				if (logger.isDebugEnabled()) {
+					logger.debug("Last-Modified value for [" + getRequestUri(request) + "] is: " + lastModified);
+				}
+				if (new ServletWebRequest(request, response).checkNotModified(lastModified) && isGet) {
+					return;
+				}
+			}
+			//执行相应的Interceptor的preHandle
+			if (!mappedHandler.applyPreHandle(processedRequest, response)) {
+				return;
+			}
+
+			// HandleAdapter使用handle处理请求
+			mv = ha.handle(processedRequest, response, mappedHandler.getHandler());
+
+			if (asyncManager.isConcurrentHandlingStarted()) {
+				return;
+			}
+			//当View为空时（比如：Handler返回为void）
+			applyDefaultViewName(processedRequest, mv);
+			//执行相应的Interceptor的postHandle
+			mappedHandler.applyPostHandle(processedRequest, response, mv);
+		}
+		catch (Exception ex) {
+			dispatchException = ex;
+		}
+		//返回处理结果。包括处理异常，渲染页面，
+		processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+	}
+	catch (Exception ex) {
+		发出完成通知触发Interceptor的afterCompletion
+		triggerAfterCompletion(processedRequest, response, mappedHandler, ex);
+	}
+	catch (Error err) {
+		triggerAfterCompletionWithError(processedRequest, response, mappedHandler, err);
+	}
+	finally {
+		//判断是否是异步请求
+		if (asyncManager.isConcurrentHandlingStarted()) {
+			// Instead of postHandle and afterCompletion
+			if (mappedHandler != null) {
+				mappedHandler.applyAfterConcurrentHandlingStarted(processedRequest, response);
+			}
+		}
+		else {
+			// 删除上传请求的临时资源
+			if (multipartRequestParsed) {
+				cleanupMultipart(processedRequest);
+			}
+		}
+	}
+}
+doDispatch方法的核心功能如下：
+1、根据request找Handler
+2、根据handle找handleAdapter
+3、用handleAdapter处理Handle
+4、processDispatchResult方法处理上面处理之后的结果（包含找到View并渲染输出给用户）
+核心概念： HandleMapping,Handle,HandlerAdapter
+总结：
+使用HandlerMapping找到干活的Handler(干活的工具)，找到使用Handler的HandlerAdapter(使用工具干活的人)，让HandlerAdapter使用Handler进行工作，
+干完活后将结果写个报告上交（通过View展示给用户）
+
+getHandler：根据request找到相应的处理器
+===========================================================================
+HandlerMapping：
+/**
+ * Look up a handler for the given request, falling back to the default
+ * handler if no specific one is found.
+ * @param request current HTTP request
+ * @return the corresponding handler instance, or the default handler
+ * @see #getHandlerInternal
+ */
+@Override
+public final HandlerExecutionChain getHandler(HttpServletRequest request) throws Exception {
+	Object handler = getHandlerInternal(request);
+	if (handler == null) {
+		handler = getDefaultHandler();
+	}
+	if (handler == null) {
+		return null;
+	}
+	// Bean name or resolved handler?
+	if (handler instanceof String) {
+		String handlerName = (String) handler;
+		handler = getApplicationContext().getBean(handlerName);
+	}
+
+	HandlerExecutionChain executionChain = getHandlerExecutionChain(handler, request);
+	if (CorsUtils.isCorsRequest(request)) {
+		CorsConfiguration globalConfig = this.corsConfigSource.getCorsConfiguration(request);
+		CorsConfiguration handlerConfig = getCorsConfiguration(handler, request);
+		CorsConfiguration config = (globalConfig != null ? globalConfig.combine(handlerConfig) : handlerConfig);
+		executionChain = getCorsHandlerExecutionChain(request, executionChain, config);
+	}
+	return executionChain;
+}
+HandlerMapping的作用是根据request查找Handler和Interceptors。获取Handler是通过模板方法getHandlerInternal交给子类
+getHandler分为两部分，getHandlerExecutionChain之前找Handler,getHandlerExecutionChain方法用于添加拦截器。
+
+protected HandlerExecutionChain getHandlerExecutionChain(Object handler, HttpServletRequest request) {
+	HandlerExecutionChain chain = (handler instanceof HandlerExecutionChain ?
+			(HandlerExecutionChain) handler : new HandlerExecutionChain(handler));
+
+	String lookupPath = this.urlPathHelper.getLookupPathForRequest(request);
+	for (HandlerInterceptor interceptor : this.adaptedInterceptors) {
+		if (interceptor instanceof MappedInterceptor) {
+			MappedInterceptor mappedInterceptor = (MappedInterceptor) interceptor;
+			if (mappedInterceptor.matches(lookupPath, this.pathMatcher)) {
+				chain.addInterceptor(mappedInterceptor.getInterceptor());
+			}
+		}
+		else {
+			chain.addInterceptor(interceptor);
+		}
+	}
+	return chain;
+}
+使用handler创建出HandlerExecutionChain，然后将adaptedInterceptors和符合要求的mappedInterceptor添加进去，最后将其返回
+===============================================================================================
+AbstractHandlerMapping：
+AbstractHandlerMapping 继承 WebApplicationObjectSupport，初始化时会自动调用模板方法initApplicationContext
+@Override
+protected void initApplicationContext() throws BeansException {
+	extendInterceptors(this.interceptors);
+	detectMappedInterceptors(this.adaptedInterceptors);
+	initInterceptors();
+}
+
+/**
+ * Detect beans of type {@link MappedInterceptor} and add them to the list of mapped interceptors.
+ * <p>This is called in addition to any {@link MappedInterceptor}s that may have been provided
+ * via {@link #setInterceptors}, by default adding all beans of type {@link MappedInterceptor}
+ * from the current context and its ancestors. Subclasses can override and refine this policy.
+ * @param mappedInterceptors an empty list to add {@link MappedInterceptor} instances to
+ */
+protected void detectMappedInterceptors(List<HandlerInterceptor> mappedInterceptors) {
+	mappedInterceptors.addAll(
+			BeanFactoryUtils.beansOfTypeIncludingAncestors(
+					getApplicationContext(), MappedInterceptor.class, true, false).values());
+}
+
+/**
+ * Initialize the specified interceptors, checking for {@link MappedInterceptor}s and
+ * adapting {@link HandlerInterceptor}s and {@link WebRequestInterceptor}s if necessary.
+ * @see #setInterceptors
+ * @see #adaptInterceptor
+ */
+protected void initInterceptors() {
+	if (!this.interceptors.isEmpty()) {
+		for (int i = 0; i < this.interceptors.size(); i++) {
+			Object interceptor = this.interceptors.get(i);
+			if (interceptor == null) {
+				throw new IllegalArgumentException("Entry number " + i + " in interceptors array is null");
+			}
+			this.adaptedInterceptors.add(adaptInterceptor(interceptor));
+		}
+	}
+}
+
+initApplicationContext 有三个方法，extendInterceptors，detectMappedInterceptors，initInterceptors
+extendInterceptors在springmvc中没有实现，可以忽略
+detectMappedInterceptors是将springmvc容器中的所有MappedInterceptor类型的Bean添加到mappedInterceptors中
+======================================================================================
+AbstractUrlHandlerMapping
+@Override
+protected Object getHandlerInternal(HttpServletRequest request) throws Exception {
+	String lookupPath = getUrlPathHelper().getLookupPathForRequest(request);
+	Object handler = lookupHandler(lookupPath, request);
+	if (handler == null) {
+		//定义一个临时变量，保存找到的原始Handler
+		Object rawHandler = null;
+		if ("/".equals(lookupPath)) {
+			rawHandler = getRootHandler();
+		}
+		if (rawHandler == null) {
+			rawHandler = getDefaultHandler();
+		}
+		if (rawHandler != null) {
+			// 如果是string类型则到容器中查找具体的Bean
+			if (rawHandler instanceof String) {
+				String handlerName = (String) rawHandler;
+				rawHandler = getApplicationContext().getBean(handlerName);
+			}
+			//模板方法，但是子类并没有实现
+			validateHandler(rawHandler, request);
+			handler = buildPathExposingHandler(rawHandler, lookupPath, lookupPath, null);
+		}
+	}
+	if (handler != null && logger.isDebugEnabled()) {
+		logger.debug("Mapping [" + lookupPath + "] to " + handler);
+	}
+	else if (handler == null && logger.isTraceEnabled()) {
+		logger.trace("No handler mapping found for [" + lookupPath + "]");
+	}
+	return handler;
+}
+getHandlerInternal方法中有两个核心方法是：lookupHandler，buildPathExposingHandler
+protected Object lookupHandler(String urlPath, HttpServletRequest request) throws Exception {
+	// 根据urlPath直接在handlerMap中查找（重点，后面会分析handlerMap的初始化）
+	Object handler = this.handlerMap.get(urlPath);
+	if (handler != null) {
+		// 如果是string类型则从容器中获取
+		if (handler instanceof String) {
+			String handlerName = (String) handler;
+			handler = getApplicationContext().getBean(handlerName);
+		}
+		validateHandler(handler, request);
+		return buildPathExposingHandler(handler, urlPath, urlPath, null);
+	}
+	// Pattern match
+	List<String> matchingPatterns = new ArrayList<String>();
+	for (String registeredPattern : this.handlerMap.keySet()) {
+		if (getPathMatcher().match(registeredPattern, urlPath)) {
+			matchingPatterns.add(registeredPattern);
+		}
+		else if (useTrailingSlashMatch()) {
+			if (!registeredPattern.endsWith("/") && getPathMatcher().match(registeredPattern + "/", urlPath)) {
+				matchingPatterns.add(registeredPattern +"/");
+			}
+		}
+	}
+	String bestPatternMatch = null;
+	Comparator<String> patternComparator = getPathMatcher().getPatternComparator(urlPath);
+	if (!matchingPatterns.isEmpty()) {
+		Collections.sort(matchingPatterns, patternComparator);
+		if (logger.isDebugEnabled()) {
+			logger.debug("Matching patterns for request [" + urlPath + "] are " + matchingPatterns);
+		}
+		bestPatternMatch = matchingPatterns.get(0);
+	}
+	if (bestPatternMatch != null) {
+		handler = this.handlerMap.get(bestPatternMatch);
+		if (handler == null) {
+			Assert.isTrue(bestPatternMatch.endsWith("/"));
+			handler = this.handlerMap.get(bestPatternMatch.substring(0, bestPatternMatch.length() - 1));
+		}
+		// Bean name or resolved handler?
+		if (handler instanceof String) {
+			String handlerName = (String) handler;
+			handler = getApplicationContext().getBean(handlerName);
+		}
+		validateHandler(handler, request);
+		String pathWithinMapping = getPathMatcher().extractPathWithinPattern(bestPatternMatch, urlPath);
+
+		// There might be multiple 'best patterns', let's make sure we have the correct URI template variables
+		// for all of them
+		Map<String, String> uriTemplateVariables = new LinkedHashMap<String, String>();
+		for (String matchingPattern : matchingPatterns) {
+			if (patternComparator.compare(bestPatternMatch, matchingPattern) == 0) {
+				Map<String, String> vars = getPathMatcher().extractUriTemplateVariables(matchingPattern, urlPath);
+				Map<String, String> decodedVars = getUrlPathHelper().decodePathVariables(request, vars);
+				uriTemplateVariables.putAll(decodedVars);
+			}
+		}
+		if (logger.isDebugEnabled()) {
+			logger.debug("URI Template variables for request [" + urlPath + "] are " + uriTemplateVariables);
+		}
+		return buildPathExposingHandler(handler, bestPatternMatch, pathWithinMapping, uriTemplateVariables);
+	}
+	// No handler found...
+	return null;
+}
+
+protected Object buildPathExposingHandler(Object rawHandler, String bestMatchingPattern,
+		String pathWithinMapping, Map<String, String> uriTemplateVariables) {
+
+	HandlerExecutionChain chain = new HandlerExecutionChain(rawHandler);
+	chain.addInterceptor(new PathExposingHandlerInterceptor(bestMatchingPattern, pathWithinMapping));
+	if (!CollectionUtils.isEmpty(uriTemplateVariables)) {
+		chain.addInterceptor(new UriTemplateVariablesHandlerInterceptor(uriTemplateVariables));
+	}
+	return chain;
+}
+buildPathExposingHandler方法用于给查找到的Handler注册两个拦截器PathExposingHandlerInterceptor，UriTemplateVariablesHandlerInterceptor
+
+handlerMap的初始化是通过registerHandler方法进行，registerHandler方法既不是自己调用，也不是父类调用而是由子类调用，这样不同的子类就可以通过
+registerHandler注册不同的Handler将组件创建出来
+==============================================================
+AbstractUrlHandlerMapping 的两个子类
+SimpleUrlHandlerMapping类非常简单，就是直接将配置的内容注册到AbstractUrlHandlerMapping中
+AbstractDetectingUrlHandlerMapping
+
+	@Override
+	public void initApplicationContext() throws ApplicationContextException {
+		super.initApplicationContext();
+		detectHandlers();
+	}
+
+	/**
+	 * Register all handlers found in the current ApplicationContext.
+	 * <p>The actual URL determination for a handler is up to the concrete
+	 * {@link #determineUrlsForHandler(String)} implementation. A bean for
+	 * which no such URLs could be determined is simply not considered a handler.
+	 * @throws org.springframework.beans.BeansException if the handler couldn't be registered
+	 * @see #determineUrlsForHandler(String)
+	 */
+	protected void detectHandlers() throws BeansException {
+		if (logger.isDebugEnabled()) {
+			logger.debug("Looking for URL mappings in application context: " + getApplicationContext());
+		}
+		String[] beanNames = (this.detectHandlersInAncestorContexts ?
+				BeanFactoryUtils.beanNamesForTypeIncludingAncestors(getApplicationContext(), Object.class) :
+				getApplicationContext().getBeanNamesForType(Object.class));
+
+		// Take any bean name that we can determine URLs for.
+		for (String beanName : beanNames) {
+			String[] urls = determineUrlsForHandler(beanName);
+			if (!ObjectUtils.isEmpty(urls)) {
+				// URL paths found: Let's consider it a handler.
+				registerHandler(urls, beanName);
+			}
+			else {
+				if (logger.isDebugEnabled()) {
+					logger.debug("Rejected bean name '" + beanName + "': no URL paths identified");
+				}
+			}
+		}
+	}
+核心方法：determineUrlsForHandler 是模板方法，有子类实现
+AbstractDetectingUrlHandlerMapping的三个子类：
+AbstractControllerUrlHandlerMapping
+BeanNameUrlHandlerMapping
+DefaultAnnotationHandlerMapping(已被弃用)
+
+BeanNameUrlHandlerMapping 检查beanName和 alias是不是以“/”开头
+
+AbstractControllerUrlHandlerMapping 有两个子类
+ControllerClassNameHandlerMapping
+ControllerBeanNameHandlerMapping
+一个是以className作为url
+另一个是使用spring容器的beanName作为url
+=============================================================
+AbstractHandlerMethodMapping
+如果想要理解AbstractHandlerMethodMapping系列，则必须必须搞明白
+class MappingRegistry {
+
+private final Map<T, MappingRegistration<T>> registry = new HashMap<T, MappingRegistration<T>>();
+
+private final Map<T, HandlerMethod> mappingLookup = new LinkedHashMap<T, HandlerMethod>();
+
+private final MultiValueMap<String, T> urlLookup = new LinkedMultiValueMap<String, T>();
+
+private final Map<String, List<HandlerMethod>> nameLookup =
+		new ConcurrentHashMap<String, List<HandlerMethod>>();
+
+private final Map<HandlerMethod, CorsConfiguration> corsLookup =
+		new ConcurrentHashMap<HandlerMethod, CorsConfiguration>();
+
+
+private final ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();
+}
+可以把MappingRegistry理解成mapping注册中心。
+mappingLookup：保存匹配条件（RequestCondition）和HandlerMethod的对应关系
+urlLookup：保存这url（pattern式的）与匹配条件（RequestCondition）的对应关系
+Map不是普通的Map而是MultiValueMap，这是一种一个key对应多个值的Map
+public interface MultiValueMap<K, V> extends Map<K, List<V>>
+通过源码可以看出value其实就是一个List。
+RequestCondition其实就是在@RequestMapping中的注解
+
+urlLookup 根据 url获取 匹配的 RequestCondition，然后根据 RequestCondition 拿到 HandlerMethod。
+需要注意的是前者返回的有可能是多个而不是一个，这个时候需要选出一个最优的，然后才可以获得HandlerMethod.
+
+nameLookup：保存name和HandlerMethod的对应关系，一个name可以有多个HandlerMethod,springmvc4新增的。
+name使用的HandlerMethodMappingNamingStrategy策略的实现类从HandlerMethod中解析出来的，默认使用RequestMappingInfoHandlerMethodMappingNamingStrategy
+
+
+@Controller
+public class HomeController {
+	
+	private static final Logger logger = LoggerFactory.getLogger(HomeController.class);
+	
+	/**
+	 * Simply selects the home view to render by returning its name.
+	 */
+	@RequestMapping(value = "/", method = RequestMethod.GET)
+	public String home(Locale locale, Model model) {
+		logger.info("Welcome home! The client locale is {}.", locale);
+		
+		Date date = new Date();
+		DateFormat dateFormat = DateFormat.getDateTimeInstance(DateFormat.LONG, DateFormat.LONG, locale);
+		
+		String formattedDate = dateFormat.format(date);
+		
+		model.addAttribute("serverTime", formattedDate );
+		
+		return "home";
+	}
+
+  @RequestMapping(value = "/index", method = RequestMethod.GET)
+  public String index(){
+    return "home2";
+  }
+
+MvcUriComponentsBuilder.MethodArgumentBuilder builder = MvcUriComponentsBuilder.fromMappingName("HC#index");
+String url = builder.build();
+HC代表HomeControler #分隔符 index代表 index对应的/index url
+也可以直接在jsp页面中通过spring标签来使用
+
+<%@ taglib prefix="c" uri="http://java.sun.com/jsp/jstl/core"%>
+<%@ taglib prefix="spring" uri="http://www.springframework.org/tags"%>
+
+<a href="${spring:mvcUrl('HC#index').build()}">测试</a>
+
+corsLookup：跨域资源请求，springmvc4新增的
+====================================================================
+AbstractHandlerMethodMapping
+AbstractHandlerMethodMapping 实现了 InitializingBean 接口，所以spring容器会自动调用 afterPropertiesSet方法
+/**
+ * Detects handler methods at initialization.
+ */
+@Override
+public void afterPropertiesSet() {
+	initHandlerMethods();
+}
+
+/**
+ * Scan beans in the ApplicationContext, detect and register handler methods.
+ * 拿到容器中的所有bean，然后根据一定的规则筛选出Handler，最后保存到Map. isHandler 是模板方法，有子类实现
+ * 在 RequestMappingHandlerMapping 中有具体的实现，就是检查类前是否有@Controller或者@RequestMapping
+ * @see #isHandler(Class)
+ * @see #getMappingForMethod(Method, Class)
+ * @see #handlerMethodsInitialized(Map)
+ */
+protected void initHandlerMethods() {
+	if (logger.isDebugEnabled()) {
+		logger.debug("Looking for request mappings in application context: " + getApplicationContext());
+	}
+	String[] beanNames = (this.detectHandlerMethodsInAncestorContexts ?
+			BeanFactoryUtils.beanNamesForTypeIncludingAncestors(getApplicationContext(), Object.class) :
+			getApplicationContext().getBeanNamesForType(Object.class));
+
+	for (String name : beanNames) {
+		if (!name.startsWith(SCOPED_TARGET_NAME_PREFIX) && isHandler(getApplicationContext().getType(name))) {
+			detectHandlerMethods(name);
+		}
+	}
+	handlerMethodsInitialized(getHandlerMethods());
+}
+
+RequestMappingHandlerMapping
+/**
+ * {@inheritDoc}
+ * Expects a handler to have a type-level @{@link Controller} annotation.
+ */
+@Override
+protected boolean isHandler(Class<?> beanType) {
+	return ((AnnotationUtils.findAnnotation(beanType, Controller.class) != null) ||
+			(AnnotationUtils.findAnnotation(beanType, RequestMapping.class) != null));
+}
+
+detectHandlerMethods负责将Handler保存到Map里，handlerMethodsInitialized可以对Handler进行一些初始化，
+是模板方法，在子类中没有实现
+
+protected void detectHandlerMethods(final Object handler) {
+	Class<?> handlerType =
+			(handler instanceof String ? getApplicationContext().getType((String) handler) : handler.getClass());
+
+	// Avoid repeated calls to getMappingForMethod which would rebuild RequestMappingInfo instances
+	final Map<Method, T> mappings = new IdentityHashMap<Method, T>();
+	final Class<?> userType = ClassUtils.getUserClass(handlerType);
+
+	Set<Method> methods = HandlerMethodSelector.selectMethods(userType, new MethodFilter() {
+		@Override
+		public boolean matches(Method method) {
+			T mapping = getMappingForMethod(method, userType);
+			if (mapping != null) {
+				mappings.put(method, mapping);
+				return true;
+			}
+			else {
+				return false;
+			}
+		}
+	});
+
+	for (Method method : methods) {
+		registerHandlerMethod(handler, method, mappings.get(method));
+	}
+}
+
+detectHandlerMethods分为两步：
+1、首选根据传入的Handler找到符合要求的方法，
+2、通过registerHandlerMethod方法进行注册。
+可以看出spring其实是将处理请求的方法所在的类看作处理器了，而不是处理请求的方法，
+不过有些地方spring也将处理请求的方法HandlerMethod作为处理器，在RequestMappingHandlerAdapter
+中判断是不是支持的Handler也是通过检查是不是HandlerMethod类型判断的。
+所有spring中的处理器随着场景的变化有可能指的处理请求的方法也有可能式处理请求方法所在的类。
+
+getMappingForMethod是模板方法具体实现在 RequestMappingHandlerMapping：如下
+@Override
+protected RequestMappingInfo getMappingForMethod(Method method, Class<?> handlerType) {
+	RequestMappingInfo info = createRequestMappingInfo(method);
+	if (info != null) {
+		RequestMappingInfo typeInfo = createRequestMappingInfo(handlerType);
+		if (typeInfo != null) {
+			info = typeInfo.combine(info);
+		}
+	}
+	return info;
+}
+
+/**
+ * Delegates to {@link #createRequestMappingInfo(RequestMapping, RequestCondition)},
+ * supplying the appropriate custom {@link RequestCondition} depending on whether
+ * the supplied {@code annotatedElement} is a class or method.
+ * @see #getCustomTypeCondition(Class)
+ * @see #getCustomMethodCondition(Method)
+ */
+private RequestMappingInfo createRequestMappingInfo(AnnotatedElement element) {
+	RequestMapping requestMapping = AnnotatedElementUtils.findMergedAnnotation(element, RequestMapping.class);
+	RequestCondition<?> condition = (element instanceof Class<?> ?
+			getCustomTypeCondition((Class<?>) element) : getCustomMethodCondition((Method) element));
+	return (requestMapping != null ? createRequestMappingInfo(requestMapping, condition) : null);
+}
+
+它是根据@RequestMapping注解来找匹配条件的，如果没有返回null，否则返回RequestMappingInfo实例
+
+registerHandlerMethod：
+protected void registerHandlerMethod(Object handler, Method method, T mapping) {
+	this.mappingRegistry.register(mapping, handler, method);
+}
+public void register(T mapping, Object handler, Method method) {
+
+	this.readWriteLock.writeLock().lock();
+	try {
+		//根据method，handler构建HandlerMethod
+		HandlerMethod handlerMethod = createHandlerMethod(handler, method);
+		//判断handlerMethod在mappingLookup是否存在，如果已经存在了，抛出异常
+		assertUniqueMethodMapping(handlerMethod, mapping);
+
+		if (logger.isInfoEnabled()) {
+			logger.info("Mapped \"" + mapping + "\" onto " + handlerMethod);
+		}
+		//放入mappingLookup中
+		this.mappingLookup.put(mapping, handlerMethod);
+
+		List<String> directUrls = getDirectUrls(mapping);
+		for (String url : directUrls) {
+			//放入urlLookup中
+			this.urlLookup.add(url, mapping);
+		}
+
+		//放入nameLookup中，
+		String name = null;
+		if (getNamingStrategy() != null) {//RequestMappingInfoHandlerMapping中使用默认的策略RequestMappingInfoHandlerMethodMappingNamingStrategy
+			name = getNamingStrategy().getName(handlerMethod, mapping);
+			addMappingName(name, handlerMethod);
+		}
+
+		CorsConfiguration corsConfig = initCorsConfiguration(handler, method, mapping);
+		if (corsConfig != null) {
+			this.corsLookup.put(handlerMethod, corsConfig);
+		}
+
+		this.registry.put(mapping, new MappingRegistration<T>(mapping, handlerMethod, directUrls, name));
+	}
+	finally {
+		this.readWriteLock.writeLock().unlock();
+	}
+}
+
+protected RequestMappingInfoHandlerMapping() {
+	setHandlerMethodMappingNamingStrategy(new RequestMappingInfoHandlerMethodMappingNamingStrategy());
+}
+
+AbstractHandlerMethodMapping：getHandlerInternal
+@Override
+protected HandlerMethod getHandlerInternal(HttpServletRequest request) throws Exception {
+	String lookupPath = getUrlPathHelper().getLookupPathForRequest(request);
+	if (logger.isDebugEnabled()) {
+		logger.debug("Looking up handler method for path " + lookupPath);
+	}
+	this.mappingRegistry.acquireReadLock();
+	try {
+		HandlerMethod handlerMethod = lookupHandlerMethod(lookupPath, request);
+		if (logger.isDebugEnabled()) {
+			if (handlerMethod != null) {
+				logger.debug("Returning handler method [" + handlerMethod + "]");
+			}
+			else {
+				logger.debug("Did not find handler method for [" + lookupPath + "]");
+			}
+		}
+		return (handlerMethod != null ? handlerMethod.createWithResolvedBean() : null);
+	}
+	finally {
+		this.mappingRegistry.releaseReadLock();
+	}
+}
+
+getHandlerInternal做了三件事：
+1、根据request获取lookupPath
+2、使用lookupHandlerMethod方法通过lookupPath，request找到handlerMethod
+3、如果找到handlerMethod则调用createWithResolvedBean方法创建新的HandlerMethod返回
+
+====================================================================================
+HandlerAdapter
+HandlerAdapter有5个实现类,
+HttpRequestHandlerAdapter,
+SimpleServletHandlerAdapter,
+AnnotationMethodHandlerAdapter 已被弃用 不做分析
+RequestMappingHandlerAdapter 可以处理任意的方法，没有任何约束。
+SimpleControllerHandlerAdapter
+=============================================================
+RequestMappingHandlerAdapter （重点）
+RequestMappingHandlerAdapter 继承 AbstractHandlerMethodAdapter
+AbstractHandlerMethodAdapter 三个接口方法分别调用了三个模板方法
+supportsInternal，handleInternal（最重要），getLastModifiedInternal
+
+handleInternal
+handleInternal 实际处理handler请求
+主要做三件事情：
+1、备好处理器所需要的参数
+2、使用处理器处理请求
+3、处理返回值，也就是将不同类型的返回值统一处理成ModelView类型
+
+分析处理器所需要的参数：
+参数有6个来源：
+1、request相关的参数，主要包括url中的参数、post过来的参数以及请求头所包含的值
+1）cookie
+2) session
+2、设置到FlashMap中的参数，这种参数主要用于redirect的参数传递
+3、SessionAttributes传递的参数，这类参数主要通过@SessionAttributes注解
+4、通过相应的注解了@ModelAttribute的方法进行设置的参数
+参数具体解析是通过HandlerMethodArgumentResolver类型的组件完成
+===============================================================
+
+RequestMappingHandlerAdapter 的初始化
+
+@Override
+public void afterPropertiesSet() {
+	// 初始化注解了@ControllerAdvice类的相关属性
+	initControllerAdviceCache();
+
+	//初始化参数解析器ArgumentResolver
+	if (this.argumentResolvers == null) {
+		List<HandlerMethodArgumentResolver> resolvers = getDefaultArgumentResolvers();
+		this.argumentResolvers = new HandlerMethodArgumentResolverComposite().addResolvers(resolvers);
+	}
+	//初始化InitBinderArgumentResolvers
+	if (this.initBinderArgumentResolvers == null) {
+		List<HandlerMethodArgumentResolver> resolvers = getDefaultInitBinderArgumentResolvers();
+		this.initBinderArgumentResolvers = new HandlerMethodArgumentResolverComposite().addResolvers(resolvers);
+	}
+	//初始化ReturnValueHandlers
+	if (this.returnValueHandlers == null) {
+		List<HandlerMethodReturnValueHandler> handlers = getDefaultReturnValueHandlers();
+		this.returnValueHandlers = new HandlerMethodReturnValueHandlerComposite().addHandlers(handlers);
+	}
+}
+
+@Override
+protected ModelAndView handleInternal(HttpServletRequest request,
+		HttpServletResponse response, HandlerMethod handlerMethod) throws Exception {
+
+	checkRequest(request);
+
+	if (getSessionAttributesHandler(handlerMethod).hasSessionAttributes()) {
+		applyCacheSeconds(response, this.cacheSecondsForSessionAttributeHandlers);
+	}
+	else {
+		prepareResponse(response);
+	}
+
+	// Execute invokeHandlerMethod in synchronized block if required.
+	if (this.synchronizeOnSession) {
+		HttpSession session = request.getSession(false);
+		if (session != null) {
+			Object mutex = WebUtils.getSessionMutex(session);
+			synchronized (mutex) {
+				return invokeHandlerMethod(request, response, handlerMethod);
+			}
+		}
+	}
+
+	return invokeHandlerMethod(request, response, handlerMethod);
+}
+核心方法：
+checkRequest
+prepareResponse
+invokeHandlerMethod
+
+checkRequest：检查给定的请求支持的方法和是否需要session
+
+protected final void checkRequest(HttpServletRequest request) throws ServletException {
+	// Check whether we should support the request method.
+	String method = request.getMethod();
+	if (this.supportedMethods != null && !this.supportedMethods.contains(method)) {
+		throw new HttpRequestMethodNotSupportedException(
+				method, StringUtils.toStringArray(this.supportedMethods));
+	}
+
+	// Check whether a session is required.
+	if (this.requireSession && request.getSession(false) == null) {
+		throw new HttpSessionRequiredException("Pre-existing session required but none found");
+	}
+}
+
+public AbstractHandlerMethodAdapter() {
+	// no restriction of HTTP methods by default
+	super(false);
+}
+
+public WebContentGenerator(boolean restrictDefaultSupportedMethods) {
+	if (restrictDefaultSupportedMethods) {
+		this.supportedMethods = new HashSet<String>(4);
+		this.supportedMethods.add(METHOD_GET);
+		this.supportedMethods.add(METHOD_HEAD);
+		this.supportedMethods.add(METHOD_POST);
+	}
+}
+所以supportedMethods是null，所有默认是不检查
+
+invokeHandlerMethod 执行具体请求
+
+===================================================================
+@SessionAttributes使用情况：
+@SessionAttributes注解用在处理器类上，用于多个请求之间传递参数
+@SessionAttributes设置的参数是暂时的传递而不是长期保存。
+1、在视图中通过request.getAttribute,session.getAttribute获取
+2、在后面请求返回的视图中通过session.getAttribute或者从Model中获取
+3、自动将参数设置后面请求所对应处理器Model类型或者有@ModelAttribute注解
+的参数里面
+
+如何设置：
+将一个参数设置到SessionAttribute中需要满足的条件
+1、在@SessionAttribute注解中设置了参数的名称或者类型
+2、在处理器中将参数设置到Model中
+
+@SessionAttributes用完后可以调用SessionStatus.setComplete来清除。
+这种方法只是请求SessionAttribute里的参数，而不会影响Session里的参数
+SessionStatus可以定义在处理器方法的参数中，RequestMappingHandlerAdapter会将其设置进去
+========================================================================================
+protected ModelAndView invokeHandlerMethod(HttpServletRequest request,
+		HttpServletResponse response, HandlerMethod handlerMethod) throws Exception {
+
+	ServletWebRequest webRequest = new ServletWebRequest(request, response);
+
+	WebDataBinderFactory binderFactory = getDataBinderFactory(handlerMethod);
+	ModelFactory modelFactory = getModelFactory(handlerMethod, binderFactory);
+
+	ServletInvocableHandlerMethod invocableMethod = createInvocableHandlerMethod(handlerMethod);
+	invocableMethod.setHandlerMethodArgumentResolvers(this.argumentResolvers);
+	invocableMethod.setHandlerMethodReturnValueHandlers(this.returnValueHandlers);
+	invocableMethod.setDataBinderFactory(binderFactory);
+	invocableMethod.setParameterNameDiscoverer(this.parameterNameDiscoverer);
+
+	ModelAndViewContainer mavContainer = new ModelAndViewContainer();
+	mavContainer.addAllAttributes(RequestContextUtils.getInputFlashMap(request));
+	modelFactory.initModel(webRequest, mavContainer, invocableMethod);
+	mavContainer.setIgnoreDefaultModelOnRedirect(this.ignoreDefaultModelOnRedirect);
+
+	AsyncWebRequest asyncWebRequest = WebAsyncUtils.createAsyncWebRequest(request, response);
+	asyncWebRequest.setTimeout(this.asyncRequestTimeout);
+
+	WebAsyncManager asyncManager = WebAsyncUtils.getAsyncManager(request);
+	asyncManager.setTaskExecutor(this.taskExecutor);
+	asyncManager.setAsyncWebRequest(asyncWebRequest);
+	asyncManager.registerCallableInterceptors(this.callableInterceptors);
+	asyncManager.registerDeferredResultInterceptors(this.deferredResultInterceptors);
+
+	if (asyncManager.hasConcurrentResult()) {
+		Object result = asyncManager.getConcurrentResult();
+		mavContainer = (ModelAndViewContainer) asyncManager.getConcurrentResultContext()[0];
+		asyncManager.clearConcurrentResult();
+		if (logger.isDebugEnabled()) {
+			logger.debug("Found concurrent result value [" + result + "]");
+		}
+		invocableMethod = invocableMethod.wrapConcurrentResult(result);
+	}
+
+	invocableMethod.invokeAndHandle(webRequest, mavContainer);
+	if (asyncManager.isConcurrentHandlingStarted()) {
+		return null;
+	}
+
+	return getModelAndView(mavContainer, modelFactory, webRequest);
+}
+WebDataBinderFactory
+ModelFactory
+ServletInvocableHandlerMethod
+
+WebDataBinderFactory是用来创建WebDataBinder
+ArgumentResolver 在进行参数解析过程中会用到WebDataBinder，
+ModelFactory在更新Model时也会用到它
+WebDataBinderFactory的创建过程就是将符合条件的注释了@InitBinder的方法找出来，并
+使用它们新建出ServletRequestDataBinderFactory类型的WebDataBinderFactory
+
+ModelFactory是用来处理Model的主要功能：
+1、在处理器具体处理之前对Model进行初始化
+2、在处理完后对Model参数进行更新。
+给Model的初始化具体包括三个部分：
+1、将原来的SessionAttributes中的值设置到Model
+2、执行相应注释了@ModelAttribute的方法并将其值
+设置到Model
+3、处理器中注解了@ModelAttribute的参数如果同时
+在SessionAttributes中也配置了，而且mavContainer中
+还没有值则从全部SessionAttributes(可能是其他粗话了其设置)
+的值）中查找并设置进去。
+调用SessionStatus#setComplete清空SessionAttributes
+是在整个处理器执行完以后才执行的，也就是这条语句在处理器中的
+位置并不重要，放在处理器开头或者结尾都不影响当前处理器对
+SessionAttributes的使用。
+
+private ModelFactory getModelFactory(HandlerMethod handlerMethod, WebDataBinderFactory binderFactory) {
+//获取SessionAttributesHandler
+SessionAttributesHandler sessionAttrHandler = getSessionAttributesHandler(handlerMethod);
+//获取处理器类的类型
+Class<?> handlerType = handlerMethod.getBeanType();
+
+//获取处理器类中注解了@ModelAttribute而且没有注解@RequestMapping的类型
+//第一次获取后添加到缓存，以后直接从缓存中获取
+Set<Method> methods = this.modelAttributeCache.get(handlerType);
+if (methods == null) {
+	methods = HandlerMethodSelector.selectMethods(handlerType, MODEL_ATTRIBUTE_METHODS);
+	this.modelAttributeCache.put(handlerType, methods);
+}
+List<InvocableHandlerMethod> attrMethods = new ArrayList<InvocableHandlerMethod>();
+// 先添加全局@ModelAttribute方法，后添加当前处理器定义的@ModelAttribute
+for (Entry<ControllerAdviceBean, Set<Method>> entry : this.modelAttributeAdviceCache.entrySet()) {
+	if (entry.getKey().isApplicableToBeanType(handlerType)) {
+		Object bean = entry.getKey().resolveBean();
+		for (Method method : entry.getValue()) {
+			attrMethods.add(createModelAttributeMethod(binderFactory, bean, method));
+		}
+	}
+}
+for (Method method : methods) {
+	Object bean = handlerMethod.getBean();
+	attrMethods.add(createModelAttributeMethod(binderFactory, bean, method));
+}
+//新建ModelFactory,三个参数，第一个是有@ModelAttribute的方法
+//第二个是WebDataBinderFactory,第三个SessionAttributesHandler
+return new ModelFactory(attrMethods, binderFactory, sessionAttrHandler);
+}
+
+ServletInvocableHandlerMethod类型非常重要，它继承自HandlerMethod并且可以直接执行
+实际请求的处理就是通过它来执行的，参数绑定、处理请求以及返回值处理都在它里面
+使用 createInvocableHandlerMethod方法创建ServletInvocableHandlerMethod
+然后将argumentResolvers,returnValueHandlers,binderFactory和parameterNameDiscoverer设置进去就完成了
+之后的三部（忽略异步处理）
+1、新建传递参数的ModelAndViewContainer容器，并将相应的参数
+设置到其Model中，
+2、请求处理后进行一些后置处理
+ModelAndViewContainer用于保存Model和View
+对ModelAndViewContainer的设置
+1、将FlashMap中数据设置到Model
+2、使用ModelFactory将SessionAttributes和注解了
+@ModelAttribute的方法参数设置到Model中
+3、根据ignoreDefaultModelOnRedirect中进行了设置
+
+执行请求，具体方法是直接调用ServletInvocableHandlerMethod（后面具体分析）
+里的invokeAndHandle方法执行的
+
+最后执行getModelAndView
+
+private ModelAndView getModelAndView(ModelAndViewContainer mavContainer,
+		ModelFactory modelFactory, NativeWebRequest webRequest) throws Exception {
+
+	modelFactory.updateModel(webRequest, mavContainer);
+	if (mavContainer.isRequestHandled()) {
+		return null;
+	}
+	ModelMap model = mavContainer.getModel();
+	ModelAndView mav = new ModelAndView(mavContainer.getViewName(), model);
+	if (!mavContainer.isViewReference()) {
+		mav.setView((View) mavContainer.getView());
+	}
+	if (model instanceof RedirectAttributes) {
+		Map<String, ?> flashAttributes = ((RedirectAttributes) model).getFlashAttributes();
+		HttpServletRequest request = webRequest.getNativeRequest(HttpServletRequest.class);
+		RequestContextUtils.getOutputFlashMap(request).putAll(flashAttributes);
+	}
+	return mav;
+}
+
+public void updateModel(NativeWebRequest request, ModelAndViewContainer mavContainer) throws Exception {
+ModelMap defaultModel = mavContainer.getDefaultModel();
+////可以看到处理器SessionStatus.setComplete()方法的位置是没有关心的
+if(mavContainer.getSessionStatus().isComplete()) {
+  this.sessionAttributesHandler.cleanupAttributes(request);
+} else {
+  this.sessionAttributesHandler.storeAttributes(request, defaultModel);
+}
+
+if(!mavContainer.isRequestHandled() && mavContainer.getModel() == defaultModel) {
+  this.updateBindingResult(request, defaultModel);
+}
+
+}
+一共作恶三件事情：
+1、调用ModelFactory的updateModel方法更新Model
+2、根据mavContainer创建了ModelAndView
+3、如果Model是RedirectAttrbutes类型，则将其设置到FlashMap
+
+这里的model只有处理器在返回redirect类型的试图才可能是
+RedirectAttrubutes类型，否则不会是RedirectAttrbutes类型
+也就是说在不返回redirect类型的视图的处理器中即使使用
+RedirectAttributes设置了变量也不会报错到FlashMap中，
+具体在ModelAndViewContainer的时候具体详细分析
+
+ModelAndViewContainer
+public class ModelAndViewContainer {
+private boolean ignoreDefaultModelOnRedirect = false;
+//视图，Object类型的，可以是实际试图也可以是String类型
+//的逻辑试图
+private Object view;
+//默认使用的Model
+private final ModelMap defaultModel = new BindingAwareModelMap();
+//redirect类型的Model
+private ModelMap redirectModel;
+//处理器返回redirect视图的标志
+private boolean redirectModelScenario = false;
+//用于设置SessionAttribute使用完的标志
+private final SessionStatus sessionStatus = new SimpleSessionStatus();
+//请求是否已经处理完成的标志
+private boolean requestHandled = false;
+.....
+}
+defaultModel，redirectModel都是Model，前者是默认使用的Model，
+后者用于传递redirect时的参数。我们在处理器中使用了Model或者ModelMap
+时，ArgumentResolver会传入defaultModel,它是BindingAwareModelMap类型，
+即继承了ModelMap又实现了Model接口，所以在处理器中使用了Model或者
+ModelMap其实使用的是同一个Model，Map参数传入的也是这个对象，处理器中
+RedirectAttributes类型的参数ArgumentResolver会传入redirectModel,它实际
+上是RedirectAttributesModelMap类型。
+
+public ModelMap getModel() {
+return this.useDefaultModel()?this.defaultModel:(this.redirectModel != null?this.redirectModel:new ModelMap());
+}
+
+private boolean useDefaultModel() {
+return !this.redirectModelScenario || this.redirectModel == null && !this.ignoreDefaultModelOnRedirect;
+}
+返回defaultModel的标志：
+1、处理器返回的不是redirect视图
+2、处理器返回的是redirect视图，但redirectModel为null 且ignoreDefaultModelOnRedirect 为false
+返回redirectModel的标志：
+1、处理器返回的是redirect视图并且redirectModel不为null
+2、处理器返回的是redirect视图 且ignoreDefaultModelOnRedirect 为true
+
+且ignoreDefaultModelOnRedirect在RequestMappingHandlerAdapter中设置
+判断处理器的返回是不是redirect视图的标志redirectModelScenario在ReturnValueHandler中设置
+========================================================================================
+SessionAttributesHandler 和 SessionAttributeStore
+SessionAttributesHandler用来处理@SessionAttributes注解的参数，
+不过它做一些宏观的事情，比如，哪个Handler都可以缓存
+哪些参数、某个参数在当前的SessionAttributes中是否存在，
+如何同时操作多个参数等，具体的工作交给SessionAttributeStore去做
+SessionAttributeStore并不是保存数据的容器，而是用于保存数据的工具，
+具体保存数据的容器默认是Session
+DefaultSessionAttributeStore
+
+public void storeAttribute(WebRequest request, String attributeName, Object attributeValue) {
+	Assert.notNull(request, "WebRequest must not be null");
+	Assert.notNull(attributeName, "Attribute name must not be null");
+	Assert.notNull(attributeValue, "Attribute value must not be null");
+	String storeAttributeName = this.getAttributeNameInSession(request, attributeName);
+	request.setAttribute(storeAttributeName, attributeValue, 1);
+}
+
+public interface RequestAttributes {
+  int SCOPE_REQUEST = 0;
+  int SCOPE_SESSION = 1;
+  int SCOPE_GLOBAL_SESSION = 2;
+  String REFERENCE_REQUEST = "request";
+  String REFERENCE_SESSION = "session";
+
+  Object getAttribute(String var1, int var2);
+
+  void setAttribute(String var1, Object var2, int var3);
+
+  void removeAttribute(String var1, int var2);
+
+  String[] getAttributeNames(int var1);
+
+  void registerDestructionCallback(String var1, Runnable var2, int var3);
+
+  Object resolveReference(String var1);
+
+  String getSessionId();
+
+  Object getSessionMutex();
+}
+第三个参数表示使用session存储
+=====================================================================
+ModelFactory
+1、初始化Model
+2、处理器执行后将Model中相应参数更新到SessionAttributes中
+
+public void initModel(NativeWebRequest request, ModelAndViewContainer mavContainer, HandlerMethod handlerMethod)
+		throws Exception {
+
+	//从SessionAttributes中取出保存的参数，并合并到mavContainer中
+	Map<String, ?> sessionAttributes = this.sessionAttributesHandler.retrieveAttributes(request);
+	mavContainer.mergeAttributes(sessionAttributes);
+	//执行有@ModelAttribute的方法并将结果设置到Model中
+	invokeModelAttributeMethods(request, mavContainer);
+
+	for (String name : findSessionAttributeArguments(handlerMethod)) {
+		if (!mavContainer.containsAttribute(name)) {
+			Object value = this.sessionAttributesHandler.retrieveAttribute(request, name);
+			if (value == null) {
+				throw new HttpSessionRequiredException("Expected session attribute '" + name + "'");
+			}
+			mavContainer.addAttribute(name, value);
+		}
+	}
+}
+initModel完成事情：
+1、从SessionAttributes取出保存的参数，合并到mavContainer
+2、执行注解了@ModelAttribute的方法并将结果设置到Model中
+3、遍历即注释了@ModelAttribute又在@SessionAttributes注释中
+的参数是否已经设置到了mavContainer，如果没有则使用SessionAttributesHandler
+从SessionAttributes中获取并设置到mavContainer中
+
+有@ModelAttribute注解方法的参数名规则如下：
+如果@ModelAttribute设置了value则直接将
+其返回，否则获取返回类型的“ShortName”
+String->string
+ClassUtils->classUtils
+UFOModel ->UFOModel
+List<Double>->doubleList
+Set<Double>->doubleList
+Double[]->doubleList
+=============================================
+更新Model
+public void updateModel(NativeWebRequest request, ModelAndViewContainer mavContainer) throws Exception {
+	ModelMap defaultModel = mavContainer.getDefaultModel();
+	if (mavContainer.getSessionStatus().isComplete()){
+		this.sessionAttributesHandler.cleanupAttributes(request);
+	}
+	else {
+		this.sessionAttributesHandler.storeAttributes(request, defaultModel);
+	}
+	if (!mavContainer.isRequestHandled() && mavContainer.getModel() == defaultModel) {
+		updateBindingResult(request, defaultModel);
+	}
+}
+updateModel 做了两件事情
+1、对SessionAttributes进行设置
+2、判断请求是否已经处理完了或者是redirect类型的返回值，其实
+也就是判断需不需要渲染页面，如果需要渲染则给Model中
+相应的参数设置BindingResult
+=======================================
+HandlerMethod
+HandlerMethod 用于封装Handler和其中具体处理请求的Method
+MethodParameter 表示一个方法的参数，parameterNameDiscoverer可以
+查找出我们定义参数时参数的名字，给ArgumentResolver的解析提供了方便
+
+InvocableHandlerMethod
+InvocableHandlerMethod 继承 HandlerMethod
+同时在父类的基础上添加了调用功能，也就是可以直接调用
+内部属性method对应的方法
+InvocableHandlerMethod增加了三个参数
+1、dataBinderFactory
+2、argumentResolvers
+3、parameterNameDiscoverer
+
+public Object invokeForRequest(NativeWebRequest request, ModelAndViewContainer mavContainer,
+		Object... providedArgs) throws Exception {
+	//1、准备方法所需的参数
+	Object[] args = getMethodArgumentValues(request, mavContainer, providedArgs);
+	if (logger.isTraceEnabled()) {
+		StringBuilder sb = new StringBuilder("Invoking [");
+		sb.append(getBeanType().getSimpleName()).append(".");
+		sb.append(getMethod().getName()).append("] method with arguments ");
+		sb.append(Arrays.asList(args));
+		logger.trace(sb.toString());
+	}
+	//调用method
+	Object returnValue = doInvoke(args);
+	if (logger.isTraceEnabled()) {
+		logger.trace("Method [" + getMethod().getName() + "] returned [" + returnValue + "]");
+	}
+	return returnValue;
+}
+==================================================================================================
+HandlerMethodArgumentResolver
+
+public interface HandlerMethodArgumentResolver {
+
+	/**
+	 * Whether the given {@linkplain MethodParameter method parameter} is
+	 * supported by this resolver.
+	 * @param parameter the method parameter to check
+	 * @return {@code true} if this resolver supports the supplied parameter;
+	 * {@code false} otherwise
+	 */
+	boolean supportsParameter(MethodParameter parameter);
+
+	/**
+	 * Resolves a method parameter into an argument value from a given request.
+	 * A {@link ModelAndViewContainer} provides access to the model for the
+	 * request. A {@link WebDataBinderFactory} provides a way to create
+	 * a {@link WebDataBinder} instance when needed for data binding and
+	 * type conversion purposes.
+	 * @param parameter the method parameter to resolve. This parameter must
+	 * have previously been passed to {@link #supportsParameter} which must
+	 * have returned {@code true}.
+	 * @param mavContainer the ModelAndViewContainer for the current request
+	 * @param webRequest the current request
+	 * @param binderFactory a factory for creating {@link WebDataBinder} instances
+	 * @return the resolved argument value, or {@code null}
+	 * @throws Exception in case of errors with the preparation of argument values
+	 */
+	Object resolveArgument(MethodParameter parameter, ModelAndViewContainer mavContainer,
+			NativeWebRequest webRequest, WebDataBinderFactory binderFactory) throws Exception;
+
+}
+HandlerMethodArgumentResolver 主要是用来为处理器解析参数的，
+HandlerMethodArgumentResolver 类中的两个方法的作用
+1、用来判断是否可以解析传入的参数
+2、实际解析参数
+HandlerMethodArgumentResolver 的实现类有三种命名方式
+1、XXXMethodArgumentResolver 参数解析器
+2、XXXMethodProcessor 除了解析参数外还可以处理相应类型的返回值
+3、XXXAdapter，它并不是直接解析参数，而是用来兼容WebArgumentResolver类型的参数解析器适配器
+========================================================================================
+PathVariableMethodArgumentResolver
+PathVariableMethodArgumentResolver 继承 AbstractNamedValueMethodArgumentResolver
+
+@Override
+public final Object resolveArgument(MethodParameter parameter, ModelAndViewContainer mavContainer,
+		NativeWebRequest webRequest, WebDataBinderFactory binderFactory) throws Exception {
+	//获取参数类型
+	Class<?> paramType = parameter.getParameterType();
+	//根据参数类型获取NamedValueInfo 
+	NamedValueInfo namedValueInfo = getNamedValueInfo(parameter);
+	//具体解析参数，模板方法，在子类实现
+	Object arg = resolveName(namedValueInfo.name, parameter, webRequest);
+	//如果没有解析到参数
+	if (arg == null) {
+		if (namedValueInfo.defaultValue != null) {
+			arg = resolveDefaultValue(namedValueInfo.defaultValue);
+		}
+		else if (namedValueInfo.required && !parameter.getParameterType().getName().equals("java.util.Optional")) {
+			handleMissingValue(namedValueInfo.name, parameter);
+		}
+		arg = handleNullValue(namedValueInfo.name, arg, paramType);
+	}
+	else if ("".equals(arg) && namedValueInfo.defaultValue != null) {
+		arg = resolveDefaultValue(namedValueInfo.defaultValue);
+	}
+	//如果binderFactory不为空，则用它创建binder并转换解析出的参数
+	if (binderFactory != null) {
+		WebDataBinder binder = binderFactory.createBinder(webRequest, null, namedValueInfo.name);
+		try {
+			arg = binder.convertIfNecessary(arg, paramType, parameter);
+		}
+		catch (ConversionNotSupportedException ex) {
+			throw new MethodArgumentConversionNotSupportedException(arg, ex.getRequiredType(),
+					namedValueInfo.name, parameter, ex.getCause());
+		}
+		catch (TypeMismatchException ex) {
+			throw new MethodArgumentTypeMismatchException(arg, ex.getRequiredType(),
+					namedValueInfo.name, parameter, ex.getCause());
+
+		}
+	}
+	//对解析出来的参数进行后置处理
+	handleResolvedValue(arg, namedValueInfo.name, parameter, mavContainer, webRequest);
+
+	return arg;
+}
+=============================================================
+RequestToViewNameTranslator
+RequestToViewNameTranslator 可以在处理器返回的view为空时使用它根据request获取viewName
+只有一个实现类 DefaultRequestToViewNameTranslator
+
+============================================================
+HandlerExceptionResolver 用于解析请求处理过程中所产生的异常
